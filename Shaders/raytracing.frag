@@ -1,7 +1,7 @@
 #version 460 core
 #define EPSILON 0.001f
 #define BIG 1000000.0f
-#define MAX_RAY_DEPTH 5
+#define MAX_RAY_DEPTH 10
 
 const int MATERIAL_DIFFUSE = 1;
 const int MATERIAL_MIRROR = 2;
@@ -113,8 +113,9 @@ SRay GenerateRay ( SCamera cam )
 
 void initializeSceneConfiguration(out STriangle triangles_out[12], out SSphere spheres_out[5])
 {
-	float wallSize = 5.0f;
-
+	float wallSize = 8.0f;
+	
+	/* front */
 	triangles_out[0].v1 = vec3(-wallSize,  wallSize,  wallSize);
 	triangles_out[0].v2 = vec3( wallSize,  wallSize,  wallSize);
 	triangles_out[0].v3 = vec3(-wallSize, -wallSize,  wallSize);
@@ -124,33 +125,47 @@ void initializeSceneConfiguration(out STriangle triangles_out[12], out SSphere s
 	triangles_out[1].v3 = vec3(-wallSize, -wallSize,  wallSize);
 	triangles_out[1].MaterialIdx = 2;
 
+	/* back */
+	triangles_out[2].v1 = vec3(-wallSize,  wallSize,  -wallSize);
+	triangles_out[2].v2 = vec3( wallSize,  wallSize,  -wallSize);
+	triangles_out[2].v3 = vec3(-wallSize, -wallSize,  -wallSize);
+	triangles_out[2].MaterialIdx = 2;
+	triangles_out[3].v1 = vec3( wallSize, -wallSize,  -wallSize);
+	triangles_out[3].v2 = vec3( wallSize,  wallSize,  -wallSize);
+	triangles_out[3].v3 = vec3(-wallSize, -wallSize,  -wallSize);
+	triangles_out[3].MaterialIdx = 2;
+
+	/* right */
 	triangles_out[4].v1 = vec3(-wallSize,  wallSize, -wallSize);
 	triangles_out[4].v2 = vec3(-wallSize,  wallSize,  wallSize);
 	triangles_out[4].v3 = vec3(-wallSize, -wallSize, -wallSize);
-	triangles_out[4].MaterialIdx = 0; 
+	triangles_out[4].MaterialIdx = 2; 
 	triangles_out[5].v1 = vec3(-wallSize, -wallSize,  wallSize);
 	triangles_out[5].v2 = vec3(-wallSize,  wallSize,  wallSize);
 	triangles_out[5].v3 = vec3(-wallSize, -wallSize, -wallSize);
-	triangles_out[5].MaterialIdx = 0;
+	triangles_out[5].MaterialIdx = 2;
 
+	/* left */
 	triangles_out[6].v1 = vec3( wallSize,  wallSize,  wallSize);
 	triangles_out[6].v2 = vec3( wallSize,  wallSize, -wallSize);
 	triangles_out[6].v3 = vec3( wallSize, -wallSize,  wallSize);
-	triangles_out[6].MaterialIdx = 4;
+	triangles_out[6].MaterialIdx = 2;
 	triangles_out[7].v1 = vec3( wallSize, -wallSize, -wallSize);
 	triangles_out[7].v2 = vec3( wallSize,  wallSize, -wallSize);
 	triangles_out[7].v3 = vec3( wallSize, -wallSize,  wallSize);
-	triangles_out[7].MaterialIdx = 4;
+	triangles_out[7].MaterialIdx = 2;
 
+	/* bottom */
 	triangles_out[8].v1 = vec3(-wallSize, -wallSize,  wallSize);
 	triangles_out[8].v2 = vec3( wallSize, -wallSize,  wallSize);
 	triangles_out[8].v3 = vec3(-wallSize, -wallSize, -wallSize);
-	triangles_out[8].MaterialIdx = 1;
+	triangles_out[8].MaterialIdx = 4;
 	triangles_out[9].v1 = vec3( wallSize, -wallSize, -wallSize);
 	triangles_out[9].v2 = vec3( wallSize, -wallSize,  wallSize);
 	triangles_out[9].v3 = vec3(-wallSize, -wallSize, -wallSize);
-	triangles_out[9].MaterialIdx = 1;
+	triangles_out[9].MaterialIdx = 4;
 
+	/* top */
 	triangles_out[10].v1 = vec3(-wallSize,  wallSize, -wallSize);
 	triangles_out[10].v2 = vec3( wallSize,  wallSize, -wallSize);
 	triangles_out[10].v3 = vec3(-wallSize,  wallSize,  wallSize);
@@ -160,25 +175,25 @@ void initializeSceneConfiguration(out STriangle triangles_out[12], out SSphere s
 	triangles_out[11].v3 = vec3(-wallSize,  wallSize,  wallSize);
 	triangles_out[11].MaterialIdx = 1;
 
-	spheres_out[0].Center = vec3(-2.5f, -wallSize + 1.5f, 2.0f);
+	spheres_out[0].Center = vec3(0.0f, -wallSize + 1.5f, 6.0f);
 	spheres_out[0].Radius = 1.5f;
 	spheres_out[0].MaterialIdx = 0;
 
-	spheres_out[1].Center = vec3(2.0f, -wallSize + 1.0f, 0.0f);
-	spheres_out[1].Radius = 1.0f;
+	spheres_out[1].Center = vec3(3.0f, -wallSize + 3.0f, 7.0f);
+	spheres_out[1].Radius = 2.0f;
 	spheres_out[1].MaterialIdx = 2;
-
-	spheres_out[2].Center = vec3(0.0f, -wallSize + 1.2f, -1.5f);
-	spheres_out[2].Radius = 1.2f;
-	spheres_out[2].MaterialIdx = 3;
 	
-	spheres_out[3].Center = vec3(1.5f, -wallSize + 0.7f + 2.0f, 3.0f);
-	spheres_out[3].Radius = 0.7f;
+	spheres_out[2].Center = vec3(-3.0f, -wallSize + 5.0f, 5.0f);
+	spheres_out[2].Radius = 2.5f;
+	spheres_out[2].MaterialIdx = 3;
+
+	spheres_out[3].Center = vec3(3.0f, -wallSize + 8.0f, 5.0f);
+	spheres_out[3].Radius = 1.0f;
 	spheres_out[3].MaterialIdx = 4;
 
-	spheres_out[4].Center = vec3(-1.0f, -wallSize + 3.5f, 0.5f);
-	spheres_out[4].Radius = 0.8f;
-	spheres_out[4].MaterialIdx = 3;
+	spheres_out[4].Center = vec3(-1.5f, -wallSize + 10.0f, 7.0f);
+	spheres_out[4].Radius = 2.0f;
+	spheres_out[4].MaterialIdx = 2;
 }
 
 void initializeLightAndMaterials(out SLight light_out, out SMaterial materials_out[5])
@@ -213,7 +228,7 @@ void initializeLightAndMaterials(out SLight light_out, out SMaterial materials_o
 	materials_out[3].IndexOfRefraction = 1.52f;
 	materials_out[3].MaterialType = MATERIAL_GLASS;
 
-	materials_out[4].Color = vec3(0.1f, 0.7f, 0.1f);
+	materials_out[4].Color = vec3(1.0f, 1.0f, 1.0f);
 	materials_out[4].LightCoeffs = vec4(0.2f, 0.8f, 0.3f, 16.0f);
 	materials_out[4].ReflectionCoef = 0.05f;
 	materials_out[4].RefractionCoef = 0.0f;
@@ -370,9 +385,8 @@ float CalculateShadowFactor(SLight sceneLight, SIntersection hitData, SSphere sp
 
 void main(void)
 {
-	/* 1. Настройка камеры */
-	vec3 camPos = vec3(0.0f, 0.5f, -10.0f);
-	vec3 camLookAt = vec3(0.0f, 0.0f, 0.0f);
+	vec3 camPos = vec3(0.0f, 0.5f, -6.0f);
+	vec3 camLookAt = vec3(0.0f, -0.5f, 0.0f);
 	uCamera.Position = camPos;
 	uCamera.View = normalize(camLookAt - uCamera.Position);
 	vec3 approxUp = vec3(0.0f, 1.0f, 0.0f);
@@ -385,16 +399,12 @@ void main(void)
 	float scaleX = scaleY * aspectRatio;
 	uCamera.Scale = vec2(scaleX, scaleY);
 
-	/* 2. Инициализация сцены */
 	initializeLightAndMaterials(light, materials);
 	initializeSceneConfiguration(triangles, spheres);
 	
-	/* итоговый цвет пикселя */
 	vec3 finalColor = vec3(0.0f, 0.0f, 0.0f);
-	/* генерируем первичный луч */
     SRay primaryRay = GenerateRay(uCamera);
 
-	/* 3. Итеративная трассировка */
 	STracingRay initialTraceRay;
 	initialTraceRay.ray = primaryRay;
 	initialTraceRay.contribution = 1.0f;
@@ -403,7 +413,6 @@ void main(void)
 
 	while(!isEmpty())
 	{
-		/* берем луч из стека */
 		STracingRay currentTraceRay = popRay();
 		SRay currentRay = currentTraceRay.ray;
 		
@@ -412,7 +421,6 @@ void main(void)
 		{
 			vec3 viewDir = normalize(uCamera.Position - intersectionData.Point);
 
-			/* обработка в зависимости от типа материала */
 			switch(intersectionData.MaterialType)
 			{
 				case MATERIAL_DIFFUSE:
@@ -421,7 +429,6 @@ void main(void)
 					finalColor += currentTraceRay.contribution * CalculatePhongShading(intersectionData, light, viewDir, shadow);
 					break;
 				}
-				/* хром/зеркало */
 				case MATERIAL_MIRROR:
 				{
                     if (intersectionData.LightCoeffs.x > 0.0 || intersectionData.LightCoeffs.y > 0.0 || intersectionData.LightCoeffs.z > 0.0) {
@@ -438,19 +445,16 @@ void main(void)
 						reflectedTRay.contribution = currentTraceRay.contribution * intersectionData.ReflectionCoef;
 						reflectedTRay.depth = currentTraceRay.depth + 1;
 
-						/* добавляем отраженный луч в стек */
 						pushRay(reflectedTRay);
 					}
 					break;
 				}
-				/* стекло/преломление */
 				case MATERIAL_GLASS:
 				{
 					if(currentTraceRay.depth < MAX_RAY_DEPTH) {
 						vec3 I = currentRay.Direction;
 						vec3 N_geo = intersectionData.Normal;
 
-						/* Отраженный луч */
 						if (intersectionData.ReflectionCoef > EPSILON) {
 							vec3 reflectDir = reflect(I, N_geo);
 							vec3 reflectOrigin = intersectionData.Point + N_geo * EPSILON * 10.0f;
@@ -462,13 +466,10 @@ void main(void)
 							pushRay(reflectTRay);
 						}
 						
-						/* Преломленный луч */
 						if (intersectionData.RefractionCoef > EPSILON) {
 							vec3 N_refr = N_geo;
-							/* отношение показателей преломления */
 							float eta_ratio;
 
-							/* входим в объект или выходим? */
 							bool entering = dot(I, N_geo) < 0.0f;
 							if (entering) {
 								eta_ratio = 1.0f / intersectionData.IndexOfRefraction;
@@ -507,7 +508,6 @@ void main(void)
 				}
 			} 
 		} else {
-		/* Луч ничего не пересек */
 			}
 	} 
 	
