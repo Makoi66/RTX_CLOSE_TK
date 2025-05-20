@@ -128,6 +128,7 @@ namespace RTX_CLOSE_TK
         protected override void OnUpdateFrame(FrameEventArgs args)
         {
             base.OnUpdateFrame(args);
+
         }
     }
 }

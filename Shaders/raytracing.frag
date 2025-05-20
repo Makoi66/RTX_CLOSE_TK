@@ -1,7 +1,7 @@
 #version 460 core
 #define EPSILON 0.001f
-#define BIG 1000000.0f
-#define MAX_RAY_DEPTH 10
+#define BIG 100000.0f
+#define MAX_RAY_DEPTH 5
 
 const int MATERIAL_DIFFUSE = 1;
 const int MATERIAL_MIRROR = 2;
@@ -47,9 +47,9 @@ struct SMaterial
 {
 	vec3 Color;
 	vec4 LightCoeffs;
-	float ReflectionCoef;
-	float RefractionCoef;
-	float IndexOfRefraction;
+	float ReflectionCoef; /* korf otrajenia */
+	float RefractionCoef; /* koef prilomleinia, prozrachnosti */
+	float IndexOfRefraction; /* koef prilomlenia */
 	int MaterialType;
 };
 
@@ -201,7 +201,7 @@ void initializeLightAndMaterials(out SLight light_out, out SMaterial materials_o
 	light_out.Position = vec3(0.0f, 4.0f, -3.0f);
 
 	materials_out[0].Color = vec3(0.9f, 0.2f, 0.2f);
-	materials_out[0].LightCoeffs = vec4(0.2f, 0.7f, 0.4f, 32.0f);
+	materials_out[0].LightCoeffs = vec4(0.2f, 0.7f, 0.4f, 32.0f); /* ambient, diffuse, specular, shininess */
 	materials_out[0].ReflectionCoef = 0.1f;
 	materials_out[0].RefractionCoef = 0.0f;
 	materials_out[0].IndexOfRefraction = 1.0f;
@@ -393,7 +393,7 @@ void main(void)
 	uCamera.Side = normalize(cross(uCamera.View, approxUp));
 	uCamera.Up = normalize(cross(uCamera.Side, uCamera.View));
 	
-	float aspectRatio = 1.0;
+	float aspectRatio = 2.0; /* sootnoshenie storon */
 	float fieldOfViewY_degrees = 50.0;
 	float scaleY = tan(radians(fieldOfViewY_degrees * 0.5f));
 	float scaleX = scaleY * aspectRatio;

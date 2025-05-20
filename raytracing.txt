@@ -1,0 +1,689 @@
+#version 460 core
+
+// Определяем маленькое значение (эпсилон) для сравнения чисел с плавающей запятой и избегания самопересечений
+#define EPSILON 0.001f
+// Определяем большое число, используемое как "бесконечность" или максимальное расстояние для трассировки
+#define BIG 1000000.0f
+// Определяем максимальную глубину рекурсии для лучей (сколько раз луч может отразиться/преломиться)
+#define MAX_RAY_DEPTH 10
+
+// Константы для идентификации типов материалов
+const int MATERIAL_DIFFUSE = 1; // Диффузный материал (рассеивающий свет)
+const int MATERIAL_MIRROR = 2;  // Зеркальный материал (отражающий свет)
+const int MATERIAL_GLASS = 3;   // Стеклянный материал (преломляющий и отражающий свет)
+
+// Выходная переменная шейдера: цвет текущего фрагмента (пикселя)
+out vec4 FragColor;
+// Входная переменная: позиция фрагмента (вероятно, координаты на экране, переданные из приложения)
+in vec3 glPosition;
+
+// Структура для описания сферы
+struct SSphere
+{
+	vec3 Center;      // Центр сферы в 3D пространстве
+	float Radius;     // Радиус сферы
+	int MaterialIdx;  // Индекс материала этой сферы в массиве материалов
+};
+
+// Структура для описания треугольника
+struct STriangle
+{
+	vec3 v1, v2, v3;  // Три вершины треугольника в 3D пространстве
+	int MaterialIdx;  // Индекс материала этого треугольника в массиве материалов
+};
+
+// Структура для описания камеры
+struct SCamera
+{
+	vec3 Position;    // Позиция камеры в мировых координатах
+	vec3 View;        // Нормализованный вектор направления взгляда камеры
+	vec3 Up;          // Нормализованный вектор "вверх" для камеры
+	vec3 Side;        // Нормализованный вектор "вбок" для камеры (перпендикулярен View и Up)
+	vec2 Scale;       // Масштабные коэффициенты для преобразования экранных координат в направление луча
+};
+
+// Структура для описания луча
+struct SRay
+{
+	vec3 Origin;      // Начальная точка (источник) луча
+	vec3 Direction;   // Нормализованный вектор направления луча
+};
+
+// Структура для описания точечного источника света
+struct SLight
+{
+	vec3 Position;    // Позиция источника света в мировых координатах
+};
+
+// Структура для описания свойств материала
+struct SMaterial
+{
+	vec3 Color;               // Основной (диффузный) цвет материала
+	vec4 LightCoeffs;         // Коэффициенты освещения (x: ambient, y: diffuse, z: specular, w: shininess)
+	float ReflectionCoef;     // Коэффициент отражения (0.0 - 1.0)
+	float RefractionCoef;     // Коэффициент преломления/прозрачности (0.0 - 1.0)
+	float IndexOfRefraction;  // Физический показатель преломления среды
+	int MaterialType;         // Тип материала (MATERIAL_DIFFUSE, MATERIAL_MIRROR, MATERIAL_GLASS)
+};
+
+// Структура для хранения информации о точке пересечения луча с объектом
+struct SIntersection
+{
+	float Time;               // Параметр t в уравнении луча P(t) = Origin + t * Direction (расстояние до пересечения)
+	vec3 Point;               // Координаты точки пересечения
+	vec3 Normal;              // Вектор нормали к поверхности в точке пересечения
+	
+	// Свойства материала объекта, с которым произошло пересечение (копируются из SMaterial)
+	vec3 Color;
+	vec4 LightCoeffs;
+	float ReflectionCoef;
+	float RefractionCoef;
+	float IndexOfRefraction;
+	int MaterialType;
+};
+
+// Структура для луча в процессе трассировки, хранящая его вклад и глубину
+struct STracingRay
+{
+	SRay ray;             // Сам луч (начало и направление)
+	float contribution;   // Вклад этого луча в итоговый цвет пикселя (уменьшается при отражениях/преломлениях)
+	int depth;            // Текущая глубина рекурсии луча
+};
+
+// Стек для итеративной трассировки лучей (вместо рекурсии функций)
+STracingRay stack[32];  // Массив, используемый как стек; размер 32
+int stackSize = 0;      // Текущее количество элементов в стеке
+
+// Функция: проверяет, пуст ли стек
+bool isEmpty()
+{
+	return stackSize == 0;
+}
+
+// Функция: добавляет луч в стек
+void pushRay(STracingRay r)
+{
+	if (stackSize < 32) // Проверка на переполнение стека
+	{
+		stack[stackSize] = r;
+		stackSize = stackSize + 1;
+	}
+	// В реальном приложении здесь могла бы быть обработка ошибки переполнения
+}
+
+// Функция: извлекает луч с вершины стека
+STracingRay popRay(){
+	stackSize = stackSize - 1; // Уменьшаем размер стека
+	return stack[stackSize];   // Возвращаем элемент, который был на вершине
+}
+
+// Глобальные переменные для сцены
+SCamera uCamera;                // Камера сцены
+SLight light;                   // Источник света в сцене
+STriangle triangles[12];        // Массив треугольников сцены (для комнаты)
+SSphere spheres[5];             // Массив сфер сцены
+SMaterial materials[5];         // Массив материалов, используемых объектами
+
+
+// Функция: генерирует первичный луч из камеры через текущий пиксель
+SRay GenerateRay ( SCamera cam )
+{
+	// Преобразуем координаты пикселя (glPosition.xy, обычно в диапазоне [-1,1]) в смещения в плоскости проекции камеры
+	// cam.Scale содержит tan(FOV/2) и tan(FOV/2)*aspectRatio
+	vec2 screenCoords = glPosition.xy * cam.Scale;
+	// Вычисляем направление луча: базовое направление камеры + смещения по осям "вбок" и "вверх"
+	vec3 direction = cam.View + cam.Side * screenCoords.x + cam.Up * screenCoords.y;
+	// Создаем и возвращаем луч с началом в позиции камеры и нормализованным направлением
+	return SRay ( cam.Position, normalize(direction) );
+}
+
+// Функция: инициализирует геометрию сцены (треугольники и сферы)
+// 'out' параметры означают, что функция будет изменять переменные, переданные ей
+void initializeSceneConfiguration(out STriangle triangles_out[12], out SSphere spheres_out[5])
+{
+	float wallSize = 8.0f; // Размер стен комнаты
+	
+	// Создание 6 стен комнаты, каждая из 2-х треугольников (итого 12 треугольников)
+	/* передняя стена */
+	triangles_out[0].v1 = vec3(-wallSize,  wallSize,  wallSize);
+	triangles_out[0].v2 = vec3( wallSize,  wallSize,  wallSize);
+	triangles_out[0].v3 = vec3(-wallSize, -wallSize,  wallSize);
+	triangles_out[0].MaterialIdx = 2; // Зеркальный материал
+	triangles_out[1].v1 = vec3( wallSize, -wallSize,  wallSize);
+	triangles_out[1].v2 = vec3( wallSize,  wallSize,  wallSize);
+	triangles_out[1].v3 = vec3(-wallSize, -wallSize,  wallSize);
+	triangles_out[1].MaterialIdx = 2;
+
+	/* задняя стена */
+	triangles_out[2].v1 = vec3(-wallSize,  wallSize,  -wallSize);
+	triangles_out[2].v2 = vec3( wallSize,  wallSize,  -wallSize);
+	triangles_out[2].v3 = vec3(-wallSize, -wallSize,  -wallSize);
+	triangles_out[2].MaterialIdx = 2;
+	triangles_out[3].v1 = vec3( wallSize, -wallSize,  -wallSize);
+	triangles_out[3].v2 = vec3( wallSize,  wallSize,  -wallSize);
+	triangles_out[3].v3 = vec3(-wallSize, -wallSize,  -wallSize);
+	triangles_out[3].MaterialIdx = 2;
+
+	/* правая стена (если смотреть изнутри, то она слева от камеры, если камера у -Z) */
+	// В коде комментарий "right", но по координатам это левая стена (x = -wallSize)
+	triangles_out[4].v1 = vec3(-wallSize,  wallSize, -wallSize);
+	triangles_out[4].v2 = vec3(-wallSize,  wallSize,  wallSize);
+	triangles_out[4].v3 = vec3(-wallSize, -wallSize, -wallSize);
+	triangles_out[4].MaterialIdx = 2; 
+	triangles_out[5].v1 = vec3(-wallSize, -wallSize,  wallSize);
+	triangles_out[5].v2 = vec3(-wallSize,  wallSize,  wallSize);
+	triangles_out[5].v3 = vec3(-wallSize, -wallSize, -wallSize);
+	triangles_out[5].MaterialIdx = 2;
+
+	/* левая стена (если смотреть изнутри, то она справа от камеры, если камера у -Z) */
+	// В коде комментарий "left", но по координатам это правая стена (x = wallSize)
+	triangles_out[6].v1 = vec3( wallSize,  wallSize,  wallSize);
+	triangles_out[6].v2 = vec3( wallSize,  wallSize, -wallSize);
+	triangles_out[6].v3 = vec3( wallSize, -wallSize,  wallSize);
+	triangles_out[6].MaterialIdx = 2;
+	triangles_out[7].v1 = vec3( wallSize, -wallSize, -wallSize);
+	triangles_out[7].v2 = vec3( wallSize,  wallSize, -wallSize);
+	triangles_out[7].v3 = vec3( wallSize, -wallSize,  wallSize);
+	triangles_out[7].MaterialIdx = 2;
+
+	/* пол */
+	triangles_out[8].v1 = vec3(-wallSize, -wallSize,  wallSize);
+	triangles_out[8].v2 = vec3( wallSize, -wallSize,  wallSize);
+	triangles_out[8].v3 = vec3(-wallSize, -wallSize, -wallSize);
+	triangles_out[8].MaterialIdx = 4; // Диффузный белый материал
+	triangles_out[9].v1 = vec3( wallSize, -wallSize, -wallSize);
+	triangles_out[9].v2 = vec3( wallSize, -wallSize,  wallSize);
+	triangles_out[9].v3 = vec3(-wallSize, -wallSize, -wallSize);
+	triangles_out[9].MaterialIdx = 4;
+
+	/* потолок */
+	triangles_out[10].v1 = vec3(-wallSize,  wallSize, -wallSize);
+	triangles_out[10].v2 = vec3( wallSize,  wallSize, -wallSize);
+	triangles_out[10].v3 = vec3(-wallSize,  wallSize,  wallSize);
+	triangles_out[10].MaterialIdx = 1; // Диффузный синеватый материал
+	triangles_out[11].v1 = vec3( wallSize,  wallSize,  wallSize);
+	triangles_out[11].v2 = vec3( wallSize,  wallSize, -wallSize);
+	triangles_out[11].v3 = vec3(-wallSize,  wallSize,  wallSize);
+	triangles_out[11].MaterialIdx = 1;
+
+	// Инициализация 5 сфер в сцене
+	spheres_out[0].Center = vec3(0.0f, -wallSize + 1.5f, 6.0f); // Сфера стоит на полу
+	spheres_out[0].Radius = 1.5f;
+	spheres_out[0].MaterialIdx = 0; // Красный диффузный материал
+
+	spheres_out[1].Center = vec3(3.0f, -wallSize + 3.0f, 7.0f);
+	spheres_out[1].Radius = 2.0f;
+	spheres_out[1].MaterialIdx = 2; // Зеркальный материал
+	
+	spheres_out[2].Center = vec3(-3.0f, -wallSize + 5.0f, 5.0f);
+	spheres_out[2].Radius = 2.5f;
+	spheres_out[2].MaterialIdx = 3; // Стеклянный материал
+
+	spheres_out[3].Center = vec3(3.0f, -wallSize + 8.0f, 5.0f);
+	spheres_out[3].Radius = 1.0f;
+	spheres_out[3].MaterialIdx = 4; // Белый диффузный материал
+
+	spheres_out[4].Center = vec3(-1.5f, -wallSize + 10.0f, 7.0f);
+	spheres_out[4].Radius = 2.0f;
+	spheres_out[4].MaterialIdx = 2; // Зеркальный материал
+}
+
+// Функция: инициализирует источник света и свойства материалов
+void initializeLightAndMaterials(out SLight light_out, out SMaterial materials_out[5])
+{
+	// Устанавливаем позицию источника света
+	light_out.Position = vec3(0.0f, 4.0f, -3.0f);
+
+	// Инициализация материала 0 (Красный диффузный)
+	materials_out[0].Color = vec3(0.9f, 0.2f, 0.2f);
+	materials_out[0].LightCoeffs = vec4(0.2f, 0.7f, 0.4f, 32.0f); // Ambient, Diffuse, Specular, Shininess
+	materials_out[0].ReflectionCoef = 0.1f;      // Слабое отражение
+	materials_out[0].RefractionCoef = 0.0f;      // Нет преломления
+	materials_out[0].IndexOfRefraction = 1.0f;   // Не используется, т.к. нет преломления
+	materials_out[0].MaterialType = MATERIAL_DIFFUSE;
+
+	// Инициализация материала 1 (Синеватый диффузный для потолка)
+	materials_out[1].Color = vec3(0.5f, 0.5f, 0.8f);
+	materials_out[1].LightCoeffs = vec4(0.2f, 0.8f, 0.1f, 10.0f);
+	materials_out[1].ReflectionCoef = 0.0f;
+	materials_out[1].RefractionCoef = 0.0f;
+	materials_out[1].IndexOfRefraction = 1.0f;
+	materials_out[1].MaterialType = MATERIAL_DIFFUSE;
+	
+	// Инициализация материала 2 (Зеркальный)
+	materials_out[2].Color = vec3(0.85f, 0.85f, 0.9f); // Цвет самой поверхности зеркала (если оно не идеально отражает)
+	materials_out[2].LightCoeffs = vec4(0.05f, 0.1f, 0.8f, 1024.0f); // Небольшой собственный цвет + сильные блики
+	materials_out[2].ReflectionCoef = 0.85f;     // Сильное отражение
+	materials_out[2].RefractionCoef = 0.0f;
+	materials_out[2].IndexOfRefraction = 1.0f;
+	materials_out[2].MaterialType = MATERIAL_MIRROR;
+
+	// Инициализация материала 3 (Стеклянный)
+	materials_out[3].Color = vec3(0.95f, 0.98f, 1.0f); // Цвет стекла (обычно для эффекта тонирования, здесь почти белый)
+	materials_out[3].LightCoeffs = vec4(0.0f, 0.0f, 0.9f, 256.0f); // Только блики, нет диффузного/эмбиентного от самого материала
+	materials_out[3].ReflectionCoef = 0.05f;     // Небольшое Френелевское отражение (упрощенно)
+	materials_out[3].RefractionCoef = 0.95f;     // Высокая прозрачность (пропускание)
+	materials_out[3].IndexOfRefraction = 1.52f;  // Показатель преломления как у обычного стекла
+	materials_out[3].MaterialType = MATERIAL_GLASS;
+
+	// Инициализация материала 4 (Белый диффузный для пола)
+	materials_out[4].Color = vec3(1.0f, 1.0f, 1.0f);
+	materials_out[4].LightCoeffs = vec4(0.2f, 0.8f, 0.3f, 16.0f);
+	materials_out[4].ReflectionCoef = 0.05f;
+	materials_out[4].RefractionCoef = 0.0f;
+	materials_out[4].IndexOfRefraction = 1.0f;
+	materials_out[4].MaterialType = MATERIAL_DIFFUSE;
+}
+
+// Функция: проверяет пересечение луча со сферой
+// Возвращает true, если есть пересечение в диапазоне [startTime, endTime], и записывает время пересечения в time_out
+bool IntersectSphere (SSphere sphere, SRay ray, float startTime, float endTime, out float time_out )
+{
+	// Вектор от центра сферы к началу луча
+	vec3 oc = ray.Origin - sphere.Center;
+	// Коэффициенты квадратного уравнения At^2 + Bt + C = 0 для пересечения луча и сферы
+	// A = dot(ray.Direction, ray.Direction) (если направление нормализовано, A=1)
+	float a = dot(ray.Direction, ray.Direction );
+	// B = 2 * dot(oc, ray.Direction), здесь b_half = B/2
+	float b_half = dot(oc, ray.Direction);
+	// C = dot(oc, oc) - sphere.Radius^2
+	float c = dot(oc, oc) - sphere.Radius * sphere.Radius;
+	// Дискриминант D = (B/2)^2 - AC
+	float discriminant = b_half * b_half - a * c;
+
+	if (discriminant < 0.0) { // Если дискриминант отрицательный, вещественных корней нет (нет пересечения)
+		return false;
+	} else { // Иначе есть одно или два пересечения
+		float sqrt_discriminant = sqrt(discriminant);
+		// Находим два корня (времени пересечения) t = (-B/2 +/- sqrt(D)) / A
+		float t1 = (-b_half - sqrt_discriminant) / a;
+		float t2 = (-b_half + sqrt_discriminant) / a;
+		
+		time_out = BIG; // Инициализируем время пересечения большим значением
+		bool found = false;
+
+		// Проверяем первое (обычно меньшее) время пересечения
+		if (t1 > startTime && t1 < endTime) { // Если пересечение находится в допустимом диапазоне
+			time_out = t1;
+			found = true;
+		}
+		// Проверяем второе время пересечения, и если оно валидно и ближе первого (или первое было невалидно)
+		if (t2 > startTime && t2 < endTime && t2 < time_out) {
+			time_out = t2;
+			found = true;
+		}
+		return found; // Возвращаем true, если найдено хотя бы одно валидное пересечение
+	}
+}
+
+// Функция: проверяет пересечение луча с треугольником (алгоритм Мёллера-Трумбора)
+// Возвращает true, если есть пересечение в диапазоне [startTime, endTime], и записывает время пересечения в time_out
+bool IntersectTriangle (SRay ray, vec3 v0, vec3 v1, vec3 v2, float startTime, float endTime, out float time_out )
+{
+	// P(u, v) = (1 - u - v) * v0 + u * v1 + v * v2      u >= 0 v >= 0 u + v <= 1
+	// O + t * D = v0 + u * edge1 + v * edge2
+	// tvec = u * edge1 + v * edge2 - t * D (где tvec = O - v0)
+	// [-D, edge1, edge2] * [t, u, v]^T = O - v0
+	time_out = -1.0f; // Инициализируем время пересечения отрицательным значением (нет пересечения)
+	vec3 edge1 = v1 - v0; // Ребро треугольника от v0 к v1
+	vec3 edge2 = v2 - v0; // Ребро треугольника от v0 к v2
+
+	// Вычисляем вектор pvec (перпендикулярен направлению луча и ребру edge2)
+	vec3 pvec = cross(ray.Direction, edge2);
+	// Определитель (если близок к нулю, луч параллелен плоскости треугольника)
+	float det = dot(edge1, pvec);
+
+	// Если определитель близок к нулю, луч параллелен треугольнику или лежит в его плоскости (пропускаем)
+	if (abs(det) < EPSILON) return false;
+
+	float invDet = 1.0 / det; // Обратный определитель
+	
+	// Вектор от вершины v0 к началу луча
+	vec3 tvec = ray.Origin - v0;
+	// Вычисляем барицентрическую координату u
+	float u = dot(tvec, pvec) * invDet;
+	// Если u < 0 или u > 1, точка пересечения вне треугольника
+	if (u < 0.0 || u > 1.0) return false;
+
+	// Вычисляем вектор qvec
+	vec3 qvec = cross(tvec, edge1);
+	// Вычисляем барицентрическую координату v
+	float v = dot(ray.Direction, qvec) * invDet;
+	// Если v < 0 или u + v > 1, точка пересечения вне треугольника
+	if (v < 0.0 || u + v > 1.0) return false;
+
+	// Вычисляем параметр t луча (расстояние до плоскости треугольника)
+	float t = dot(edge2, qvec) * invDet;
+	
+	// Если пересечение находится в допустимом диапазоне времени (расстояния)
+	if (t > startTime && t < endTime) {
+        time_out = t; // Записываем время пересечения
+        return true;  // Пересечение найдено
+    }
+	return false; // Пересечение вне диапазона
+}
+
+// Функция: находит ближайшее пересечение луча со всеми объектами сцены
+// 'inout' параметр intersect_out означает, что функция может читать и изменять его
+bool FindClosestIntersection(SRay ray, SSphere spheres_in[5], STriangle triangles_in[12], SMaterial materials_in[5], float startTime, float endTime, inout SIntersection intersect_out)
+{
+	bool foundIntersection = false; // Флаг: найдено ли какое-либо пересечение
+	intersect_out.Time = endTime;   // Изначально ищем пересечения до endTime (т.е. самое дальнее допустимое)
+
+	// Перебираем все сферы в сцене
+	for(int i = 0; i < 5; ++i)
+	{
+		float currentTime; // Переменная для времени пересечения с текущей сферой
+		// Проверяем пересечение с текущей сферой. 
+		// intersect_out.Time используется как endTime, чтобы искать только пересечения ближе уже найденного.
+		if(IntersectSphere(spheres_in[i], ray, startTime, intersect_out.Time, currentTime ))
+		{
+			foundIntersection = true; // Отмечаем, что пересечение найдено
+			intersect_out.Time = currentTime; // Обновляем время ближайшего пересечения
+			intersect_out.Point = ray.Origin + ray.Direction * currentTime; // Вычисляем точку пересечения
+			// Рассчитываем нормаль к поверхности сферы в точке пересечения.
+			// Для сферы нормаль - это вектор от центра сферы к точке на ее поверхности.
+			intersect_out.Normal = normalize ( intersect_out.Point - spheres_in[i].Center ); // Нормаль для сферы (от центра к точке)
+			
+			// Получаем материал пересеченной сферы
+			SMaterial currentMaterial = materials_in[spheres_in[i].MaterialIdx];
+			// Копируем свойства материала в структуру пересечения
+			intersect_out.Color = currentMaterial.Color;
+			intersect_out.LightCoeffs = currentMaterial.LightCoeffs;
+			intersect_out.ReflectionCoef = currentMaterial.ReflectionCoef;
+			intersect_out.RefractionCoef = currentMaterial.RefractionCoef;
+			intersect_out.IndexOfRefraction = currentMaterial.IndexOfRefraction;
+			intersect_out.MaterialType = currentMaterial.MaterialType;
+		}
+	}
+
+	// Перебираем все треугольники в сцене
+	for(int i = 0; i < 12; ++i)
+	{
+		float currentTime; // Переменная для времени пересечения с текущим треугольником
+		// Проверяем пересечение с текущим треугольником.
+		// intersect_out.Time используется как endTime, чтобы искать только пересечения ближе уже найденного.
+		if(IntersectTriangle(ray, triangles_in[i].v1, triangles_in[i].v2, triangles_in[i].v3, startTime, intersect_out.Time, currentTime))
+		{
+			foundIntersection = true; // Отмечаем, что пересечение найдено
+			intersect_out.Time = currentTime; // Обновляем время ближайшего пересечения
+			intersect_out.Point = ray.Origin + ray.Direction * currentTime; // Вычисляем точку пересечения
+			// Рассчитываем нормаль к поверхности треугольника.
+			// Нормаль - это векторное произведение двух его ребер.
+			vec3 e1 = triangles_in[i].v2 - triangles_in[i].v1;
+			vec3 e2 = triangles_in[i].v3 - triangles_in[i].v1;
+			intersect_out.Normal = normalize(cross(e1, e2));
+            // Проверяем направление нормали: она должна быть направлена "наружу" от поверхности, против луча.
+            // Если скалярное произведение нормали и направления луча положительно, значит нормаль "смотрит" в ту же сторону, что и луч,
+            // т.е. луч попал в "заднюю" сторону полигона или нормаль была вычислена неверно (порядок вершин).
+            // Инвертируем нормаль, чтобы она всегда была направлена против падающего луча (для корректного освещения и отражений/преломлений).
+            if (dot(intersect_out.Normal, ray.Direction) > 0.0f) {
+                intersect_out.Normal = -intersect_out.Normal;
+            }
+
+			// Получаем материал пересеченного треугольника
+			SMaterial currentMaterial = materials_in[triangles_in[i].MaterialIdx];
+			// Копируем свойства материала в структуру пересечения
+			intersect_out.Color = currentMaterial.Color;
+			intersect_out.LightCoeffs = currentMaterial.LightCoeffs;
+			intersect_out.ReflectionCoef = currentMaterial.ReflectionCoef;
+			intersect_out.RefractionCoef = currentMaterial.RefractionCoef;
+			intersect_out.IndexOfRefraction = currentMaterial.IndexOfRefraction;
+			intersect_out.MaterialType = currentMaterial.MaterialType;
+		}
+	}
+	return foundIntersection; // Возвращаем true, если хотя бы одно пересечение было найдено
+}
+
+// Функция: вычисляет цвет в точке пересечения по модели освещения Фонга
+vec3 CalculatePhongShading (SIntersection hitData, SLight sceneLight, vec3 viewDirection, float shadowFactor)
+{
+	vec3 N = hitData.Normal; // Нормаль в точке пересечения
+	vec3 L = normalize ( sceneLight.Position - hitData.Point ); // Вектор направления от точки к источнику света
+	vec3 V = viewDirection; // Вектор направления от точки к наблюдателю (камере)
+
+	// Ambient (фоновая) составляющая
+	// Фоновое освещение имитирует рассеянный свет, который приходит со всех направлений
+	// и предотвращает появление абсолютно черных областей.
+	// hitData.LightCoeffs.x - это коэффициент фонового отражения материала.
+	// hitData.Color - это базовый цвет материала.
+	vec3 ambient = hitData.LightCoeffs.x * hitData.Color;
+
+	// Diffuse (диффузная) составляющая
+	// Диффузное освещение моделирует свет, который равномерно рассеивается от поверхности во всех направлениях.
+	// Его интенсивность зависит от угла между нормалью (N) и направлением на свет (L) (закон Ламберта).
+	// NdotL - косинус угла между нормалью и направлением на свет (интенсивность диффузного света)
+	float NdotL = max(dot(N, L), 0.0f); // max с 0, чтобы избежать отрицательного света с обратной стороны
+	// hitData.LightCoeffs.y - диффузный коэффициент материала
+	// shadowFactor - коэффициент затенения (1.0 - полностью освещена, <1.0 - в тени)
+	vec3 diffuse = hitData.LightCoeffs.y * NdotL * hitData.Color * shadowFactor;
+
+	// Specular (зеркальная/бликовая) составляющая 
+	// Зеркальное освещение моделирует блики на гладких, блестящих поверхностях.
+	// Блик наиболее интенсивен, когда угол падения света равен углу отражения относительно наблюдателя.
+	vec3 R = reflect(-L, N); // Вектор отражения света (-L, т.к. reflect ожидает направление *к* поверхности)
+	// RdotV - косинус угла между вектором отражения и направлением на наблюдателя
+	float RdotV = max(dot(R, V), 0.0f); // max с 0
+	vec3 specular = vec3(0.0f); // Инициализируем блик нулем
+	if (shadowFactor > 0.0f) { // Блики есть только если точка не в полной тени
+		// hitData.LightCoeffs.z - зеркальный коэффициент материала
+		// hitData.LightCoeffs.w - показатель блеска (shininess)
+        specular = hitData.LightCoeffs.z * pow(RdotV, hitData.LightCoeffs.w) * vec3(1.0f); // Цвет блика обычно белый
+    }
+	
+	// Итоговый цвет по Фонгу = фоновый + диффузный + зеркальный
+	return ambient + diffuse + specular;
+}
+
+// Функция: вычисляет фактор тени для точки пересечения
+// Возвращает 1.0 если точка освещена, <1.0 если в тени
+float CalculateShadowFactor(SLight sceneLight, SIntersection hitData, SSphere spheres_in[5], STriangle triangles_in[12], SMaterial materials_in[5])
+{
+	// Начало теневого луча смещено от поверхности вдоль нормали, чтобы избежать самозатенения (пересечения с той же поверхностью)
+	vec3 shadowRayOrigin = hitData.Point + hitData.Normal * EPSILON * 10.0f; 
+	// Направление теневого луча - от точки на поверхности к источнику света
+	vec3 shadowRayDirection = normalize(sceneLight.Position - hitData.Point);
+	// Расстояние от точки до источника света. Пересечения дальше этого расстояния не блокируют свет от данного источника.
+	float distanceToLight = distance(sceneLight.Position, hitData.Point);
+
+	SIntersection shadowIntersect; // Структура для информации о пересечении теневого луча
+	// Ищем пересечение теневого луча с объектами сцены.
+	// Луч идет от точки на поверхности (startTime = EPSILON, чтобы не пересечься с самой собой)
+	// до источника света (endTime = distanceToLight - EPSILON, чтобы не искать за источником света).
+	if(FindClosestIntersection(SRay(shadowRayOrigin, shadowRayDirection), spheres_in, triangles_in, materials_in, EPSILON, distanceToLight - EPSILON, shadowIntersect))
+	{
+		// Если найдено пересечение на пути к источнику света, значит точка в тени.
+		// Возвращаем малый фактор (например, 0.1 для мягких теней или эффекта ambient occlusion от тени).
+		return 0.1f; 
+	}
+	// Если пересечений нет, точка полностью освещена.
+	return 1.0f;
+}
+
+// Главная функция фрагментного шейдера, выполняется для каждого пикселя
+void main(void)
+{
+	// --- Настройка камеры ---
+	vec3 camPos = vec3(0.0f, 0.5f, -6.0f);    // Позиция камеры в мировых координатах
+	vec3 camLookAt = vec3(0.0f, -0.5f, 0.0f); // Точка, на которую смотрит камера
+	uCamera.Position = camPos;
+	uCamera.View = normalize(camLookAt - uCamera.Position); // Вектор направления взгляда
+	vec3 approxUp = vec3(0.0f, 1.0f, 0.0f); // Приблизительный вектор "вверх" (обычно (0,1,0))
+	// Вектор "вбок" (перпендикулярен взгляду и "вверх"), используется для построения координатной системы камеры
+	uCamera.Side = normalize(cross(uCamera.View, approxUp));
+	// Точный вектор "вверх" (перпендикулярен "вбок" и взгляду)
+	uCamera.Up = normalize(cross(uCamera.Side, uCamera.View));
+	
+	// --- Настройка проекции камеры (для генерации лучей) ---
+	float aspectRatio = 2.0; // Соотношение сторон экрана (ширина/высота). Здесь 1:1.
+	float fieldOfViewY_degrees = 50.0; // Угол обзора по вертикали в градусах
+	// Масштаб по Y для преобразования экранных координат в направление луча.
+	// tan(FOV_Y/2) дает половину высоты проекционной плоскости на расстоянии 1 от камеры.
+	float scaleY = tan(radians(fieldOfViewY_degrees * 0.5f));
+	float scaleX = scaleY * aspectRatio; // Масштаб по X
+	uCamera.Scale = vec2(scaleX, scaleY); // Сохраняем масштабы в структуре камеры
+
+	// --- Инициализация сцены ---
+	initializeLightAndMaterials(light, materials);      // Инициализируем источник света и материалы
+	initializeSceneConfiguration(triangles, spheres);   // Инициализируем геометрию (сферы и треугольники)
+	
+	vec3 finalColor = vec3(0.0f, 0.0f, 0.0f); // Итоговый цвет пикселя, инициализирован черным
+    SRay primaryRay = GenerateRay(uCamera);   // Генерируем первичный луч из камеры для текущего пикселя
+
+	// --- Инициализация стека трассировки ---
+	STracingRay initialTraceRay;
+	initialTraceRay.ray = primaryRay;         // Первичный луч
+	initialTraceRay.contribution = 1.0f;      // Начальный вклад в цвет - полный (100%)
+	initialTraceRay.depth = 0;                // Начальная глубина рекурсии - 0
+	pushRay(initialTraceRay);                 // Помещаем первичный луч в стек для обработки
+
+	// --- Основной цикл трассировки (итеративный, с использованием стека) ---
+	while(!isEmpty()) // Пока в стеке есть лучи для обработки
+	{
+		STracingRay currentTraceRay = popRay(); // Извлекаем луч с вершины стека
+		SRay currentRay = currentTraceRay.ray;  // Текущий обрабатываемый луч
+		
+		SIntersection intersectionData; // Структура для хранения данных о пересечении
+		// Ищем ближайшее пересечение для текущего луча в диапазоне [EPSILON, BIG]
+		if (FindClosestIntersection(currentRay, spheres, triangles, materials, EPSILON, BIG, intersectionData))
+		{
+			// Если пересечение найдено:
+			// Вектор от точки пересечения к камере (для модели Фонга)
+			vec3 viewDir = normalize(uCamera.Position - intersectionData.Point);
+
+			// Обработка в зависимости от типа материала пересеченного объекта
+			switch(intersectionData.MaterialType)
+			{
+				case MATERIAL_DIFFUSE:
+				{
+					// Для диффузного материала: рассчитываем затенение и локальное освещение (Фонг)
+					float shadow = CalculateShadowFactor(light, intersectionData, spheres, triangles, materials);
+					// Добавляем цвет к итоговому цвету пикселя, умноженный на вклад текущего луча
+					finalColor += currentTraceRay.contribution * CalculatePhongShading(intersectionData, light, viewDir, shadow);
+					break;
+				}
+				case MATERIAL_MIRROR:
+				{
+                    // Для зеркального материала:
+                    // Сначала добавляем собственное освещение поверхности зеркала (если оно не идеально отражающее, а имеет цвет/диффузность)
+                    // Это позволяет зеркалу быть, например, цветным или иметь блики на своей поверхности.
+                    if (intersectionData.LightCoeffs.x > 0.0 || intersectionData.LightCoeffs.y > 0.0 || intersectionData.LightCoeffs.z > 0.0) {
+                        float shadowMirrorSurface = CalculateShadowFactor(light, intersectionData, spheres, triangles, materials);
+                        // (1.0f - intersectionData.ReflectionCoef) - это доля света, которая не отражается, а поглощается/рассеивается поверхностью зеркала.
+                        finalColor += currentTraceRay.contribution * (1.0f - intersectionData.ReflectionCoef) * CalculatePhongShading(intersectionData, light, viewDir, shadowMirrorSurface);
+                    }
+
+					// Если не достигнута максимальная глубина трассировки и материал имеет коэффициент отражения больше нуля
+					if(currentTraceRay.depth < MAX_RAY_DEPTH && intersectionData.ReflectionCoef > EPSILON) {
+						// Вычисляем направление отраженного луча
+						vec3 reflectDirection = reflect(currentRay.Direction, intersectionData.Normal);
+						// Начало отраженного луча смещено от поверхности вдоль нормали, чтобы избежать самопересечения
+						vec3 reflectOrigin = intersectionData.Point + intersectionData.Normal * EPSILON * 10.0f; 
+						
+						STracingRay reflectedTRay; // Новый луч для трассировки (отраженный)
+						reflectedTRay.ray = SRay(reflectOrigin, reflectDirection);
+						// Вклад отраженного луча = вклад текущего луча * коэффициент отражения материала
+						reflectedTRay.contribution = currentTraceRay.contribution * intersectionData.ReflectionCoef;
+						reflectedTRay.depth = currentTraceRay.depth + 1; // Увеличиваем глубину трассировки
+
+						pushRay(reflectedTRay); // Добавляем отраженный луч в стек для дальнейшей обработки
+					}
+					break;
+				}
+				case MATERIAL_GLASS:
+				{
+					// Для стеклянного материала (обрабатывает и отражение по Френелю, и преломление)
+					if(currentTraceRay.depth < MAX_RAY_DEPTH) { // Если не достигнута максимальная глубина
+						vec3 I = currentRay.Direction;        // Направление падающего луча
+						vec3 N_geo = intersectionData.Normal; // Геометрическая нормаль поверхности
+
+						// --- Отражение (часть света всегда отражается от диэлектриков, эффект Френеля) ---
+						// В этом коде ReflectionCoef для стекла задан вручную, это упрощенный Френель.
+						if (intersectionData.ReflectionCoef > EPSILON) {
+							vec3 reflectDir = reflect(I, N_geo); // Направление отраженного луча
+							vec3 reflectOrigin = intersectionData.Point + N_geo * EPSILON * 10.0f; // Смещенное начало
+							
+							STracingRay reflectTRay;
+							reflectTRay.ray = SRay(reflectOrigin, reflectDir);
+							// Вклад от отраженной части
+							reflectTRay.contribution = currentTraceRay.contribution * intersectionData.ReflectionCoef; 
+							reflectTRay.depth = currentTraceRay.depth + 1;
+							pushRay(reflectTRay); // Добавляем отраженный луч в стек
+						}
+						
+						// --- Преломление ---
+						if (intersectionData.RefractionCoef > EPSILON) { // Если материал пропускает свет (прозрачный)
+							vec3 N_refr = N_geo; // Нормаль, используемая для преломления
+							float eta_ratio;     // Отношение коэффициентов преломления (n1/n2)
+
+							// Определяем, входит ли луч в объект или выходит из него
+							// dot(I, N_geo) < 0 означает, что луч и нормаль смотрят в противоположные стороны (луч входит)
+							bool entering = dot(I, N_geo) < 0.0f; 
+							if (entering) { // Луч входит в среду (например, из воздуха в стекло)
+								// eta_ratio = n_воздуха / n_материала (n_воздуха ~ 1.0)
+								eta_ratio = 1.0f / intersectionData.IndexOfRefraction;
+							} else { // Луч выходит из среды (например, из стекла в воздух)
+								// eta_ratio = n_материала / n_воздуха
+								eta_ratio = intersectionData.IndexOfRefraction / 1.0f;
+								// При выходе из среды нормаль должна быть направлена "внутрь" по отношению к лучу,
+								// т.е. в ту же сторону, что и геометрическая нормаль, если мы внутри.
+								// Поэтому инвертируем геометрическую нормаль.
+								N_refr = -N_geo; 
+							}
+
+							// Вычисляем направление преломленного луча с помощью закона Снеллиуса (функция refract)
+							vec3 refractDir = refract(I, N_refr, eta_ratio);
+
+							// Проверка на полное внутреннее отражение (Total Internal Reflection - TIR)
+							// Функция refract возвращает нулевой вектор, если происходит TIR.
+							// dot(refractDir, refractDir) будет близко к нулю.
+							if (dot(refractDir, refractDir) < EPSILON * EPSILON) { 
+                                // Если произошло TIR, и мы еще не учли всю энергию через "френелевское" отражение
+                                // (т.е. ReflectionCoef не равен 1.0), то оставшуюся энергию,
+                                // которая предназначалась для преломления (RefractionCoef), пускаем как отраженный луч.
+                                // Это упрощенная обработка, в более точных моделях Френель бы сам все определил.
+                                if (intersectionData.ReflectionCoef < 1.0f - EPSILON) { 
+                                     vec3 reflectDirTIR = reflect(I, N_geo); // Обычное отражение
+                                     vec3 tirOrigin = intersectionData.Point + N_geo * EPSILON * 10.0f; // Смещенное начало
+
+                                     STracingRay tirTRay;
+                                     tirTRay.ray = SRay(tirOrigin, reflectDirTIR);
+                                     // Вклад от TIR равен той доле, которая должна была преломиться
+                                     tirTRay.contribution = currentTraceRay.contribution * intersectionData.RefractionCoef; 
+                                     tirTRay.depth = currentTraceRay.depth + 1;
+                                     pushRay(tirTRay); // Добавляем этот "TIR-отраженный" луч в стек
+                                }
+							} else { // Нет TIR, значит есть действительный преломленный луч
+								vec3 refractOrigin;
+								// Смещаем начало преломленного луча:
+								// Если входим, то чуть "внутрь" от поверхности (против нормали).
+								// Если выходим, то чуть "наружу" от поверхности (вдоль исходной геометрической нормали).
+                                if(entering) refractOrigin = intersectionData.Point - N_geo * EPSILON * 10.0f; 
+                                else refractOrigin = intersectionData.Point + N_geo * EPSILON * 10.0f; // При выходе смещение по исходной N_geo
+
+								STracingRay refractTRay; // Новый луч для трассировки (преломленный)
+                                refractTRay.ray = SRay(refractOrigin, refractDir);
+								// Вклад преломленного луча = вклад текущего луча * коэффициент пропускания материала
+								refractTRay.contribution = currentTraceRay.contribution * intersectionData.RefractionCoef;
+								refractTRay.depth = currentTraceRay.depth + 1; // Увеличиваем глубину
+								pushRay(refractTRay); // Добавляем преломленный луч в стек
+							}
+						}
+					}
+					break;
+				}
+			} 
+		} else {
+			// Если луч не пересек ни один объект (улетел в "пустоту" или фон сцены)
+			// Здесь можно было бы добавить цвет фона, например:
+			// finalColor += currentTraceRay.contribution * backgroundColor; 
+			// Но в данном коде цвет фона не обрабатывается, и такие лучи просто не вносят вклад.
+		}
+	} 
+	
+	// Постобработка итогового цвета:
+	// clamp ограничивает каждый компонент цвета (R, G, B) диапазоном [0.0, 1.0],
+	// чтобы избежать артефактов от слишком ярких или отрицательных цветов.
+	// Альфа-канал устанавливается в 1.0 (полностью непрозрачный).
+	FragColor = vec4 (clamp(finalColor, 0.0, 1.0), 1.0);
+}

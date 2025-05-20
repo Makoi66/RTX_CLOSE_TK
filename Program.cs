@@ -11,7 +11,7 @@ namespace RTX_CLOSE_TK
     {
         static void Main(string[] args)
         {
-            using (View view = new View(1400, 1400))
+            using (View view = new View(2000, 1000))
             {
                 view.Run();
             }
